@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gofrs/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
@@ -9,6 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 )
 
 var db *gorm.DB
@@ -21,6 +25,25 @@ const (
 	Cooperative        CompanyType = "Cooperative"
 	SoleProprietorship CompanyType = "SoleProprietorship"
 )
+
+type User struct {
+	Username string `gorm:"type:varchar(100);not null;unique"`
+	Password string `gorm:"type:varchar(100)"`
+}
+
+type JwtToken struct {
+	Token string `json:"token"`
+}
+
+type Exception struct {
+	Message string `json:"message"`
+}
+
+type Response struct {
+	Data string `json:"data"`
+}
+
+var JwtKey = []byte(os.Getenv("JWT_KEY"))
 
 type Company struct {
 	ID            uuid.UUID   `gorm:"type:uuid;primary_key;default:uuid_generate_v4()"`
@@ -58,12 +81,14 @@ func main() {
 	}
 
 	db.AutoMigrate(&Company{})
+	db.AutoMigrate(&User{})
 
 	r := mux.NewRouter()
-	r.HandleFunc("/company", createCompanyHandler).Methods("POST")
-	r.HandleFunc("/company/{id}", getCompanyHandler).Methods("GET")
-	r.HandleFunc("/company/{id}", updateCompanyHandler).Methods("PATCH")
-	r.HandleFunc("/company/{id}", deleteCompanyHandler).Methods("DELETE")
+	r.HandleFunc("/company", validateMiddleware(createCompanyHandler)).Methods("POST")
+	r.HandleFunc("/company/{id}", validateMiddleware(getCompanyHandler)).Methods("GET")
+	r.HandleFunc("/company/{id}", validateMiddleware(updateCompanyHandler)).Methods("PATCH")
+	r.HandleFunc("/company/{id}", validateMiddleware(deleteCompanyHandler)).Methods("DELETE")
+	r.HandleFunc("/authenticate", createToken).Methods("POST")
 
 	http.Handle("/", r)
 	err = http.ListenAndServe(":8080", jsonContentTypeMiddleware(r))
@@ -117,11 +142,7 @@ func getCompanyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No record found.", http.StatusNotFound)
 		return
 	}
-	err = json.NewEncoder(w).Encode(company)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	_ = json.NewEncoder(w).Encode(company)
 }
 
 func updateCompanyHandler(w http.ResponseWriter, r *http.Request) {
@@ -154,11 +175,7 @@ func updateCompanyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: produce event to Kafka
-	err = json.NewEncoder(w).Encode(company)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	_ = json.NewEncoder(w).Encode(company)
 }
 
 func deleteCompanyHandler(w http.ResponseWriter, r *http.Request) {
@@ -187,4 +204,47 @@ var companyTypes = map[CompanyType]bool{
 
 func isValidCompanyType(t CompanyType) bool {
 	return companyTypes[t]
+}
+
+func createToken(w http.ResponseWriter, r *http.Request) {
+	var user User
+	_ = json.NewDecoder(r.Body).Decode(&user)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"username": user.Username,
+		"password": user.Password,
+		"exp":      time.Now().Add(time.Hour * time.Duration(1)).Unix(),
+	})
+	tokenString, err := token.SignedString(JwtKey)
+	if err != nil {
+		fmt.Println(err)
+	}
+	_ = json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
+}
+
+func validateMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizationHeader := r.Header.Get("authorization")
+		if authorizationHeader != "" {
+			bearerToken := strings.Split(authorizationHeader, " ")
+			if len(bearerToken) == 2 {
+				token, err := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
+					if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+						return nil, fmt.Errorf("there was an err")
+					}
+					return JwtKey, nil
+				})
+				if err != nil {
+					_ = json.NewEncoder(w).Encode(Exception{Message: err.Error()})
+					return
+				}
+				if token.Valid {
+					next.ServeHTTP(w, r)
+				} else {
+					_ = json.NewEncoder(w).Encode(Exception{Message: "Invalid authorization token"})
+				}
+			}
+		} else {
+			_ = json.NewEncoder(w).Encode(Exception{Message: "An authorization header is required"})
+		}
+	})
 }

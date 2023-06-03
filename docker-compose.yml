@@ -7,6 +7,7 @@ services:
     build: .
     environment:
       DATABASE_ARGS: "host=pg-db port=5432 user=pguser dbname=xmcrud password=pguser sslmode=disable"
+      JWT_KEY: "xm-crud-jwt-key"
     ports:
       - "8080:8080"
     depends_on:
