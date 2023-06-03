@@ -1,58 +1,16 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"github.com/dgrijalva/jwt-go"
-	"github.com/gofrs/uuid"
 	"github.com/gorilla/mux"
-	"github.com/jinzhu/gorm"
 	_ "github.com/lib/pq"
-	"github.com/segmentio/kafka-go"
+	"github.com/mpgallage/xmcrud/database"
+	"github.com/mpgallage/xmcrud/events"
+	"github.com/mpgallage/xmcrud/handlers"
+	"github.com/mpgallage/xmcrud/middleware"
 	log "github.com/sirupsen/logrus"
-	"math/rand"
 	"net/http"
 	"os"
-	"strings"
-	"time"
 )
-
-var db *gorm.DB
-
-type CompanyType string
-
-const (
-	Corporations       CompanyType = "Corporations"
-	NonProfit          CompanyType = "NonProfit"
-	Cooperative        CompanyType = "Cooperative"
-	SoleProprietorship CompanyType = "SoleProprietorship"
-)
-
-type User struct {
-	Username string `gorm:"type:varchar(100);not null;unique"`
-	Password string `gorm:"type:varchar(100)"`
-}
-
-type JwtToken struct {
-	Token string `json:"token"`
-}
-
-type Exception struct {
-	Message string `json:"message"`
-}
-
-var JwtKey = []byte(os.Getenv("JWT_KEY"))
-var kafkaWriter *kafka.Writer
-
-type Company struct {
-	ID            uuid.UUID   `gorm:"type:uuid;primary_key;default:uuid_generate_v4()"`
-	Name          string      `gorm:"type:varchar(15);not null;unique"`
-	Description   string      `gorm:"type:varchar(3000)"`
-	EmployeeCount int         `gorm:"type:int;not null"`
-	Registered    bool        `gorm:"type:boolean;not null"`
-	Type          CompanyType `gorm:"type:varchar(50);not null"` //Corporations | NonProfit | Cooperative | Sole Proprietorship
-}
 
 func init() {
 	log.SetFormatter(&log.JSONFormatter{})
@@ -61,223 +19,22 @@ func init() {
 }
 
 func main() {
-	var err error
-	db, err = gorm.Open("postgres", os.Getenv("DATABASE_ARGS"))
-	if err != nil {
-		log.Fatal("Error connecting to database.", err)
-		panic("Failed to connect database")
-	}
-	defer func(db *gorm.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Error("Error closing database!", err)
-		}
-	}(db)
-
-	tx := db.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-	if tx.Error != nil {
-		log.Fatal("Error creating extension.", tx.Error)
-		return
-	}
-
-	db.AutoMigrate(&Company{})
-	db.AutoMigrate(&User{})
-
-	kafkaURL := os.Getenv("KAFKA_URL")
-	topic := os.Getenv("KAFKA_TOPIC")
-
-	kafkaWriter = getKafkaWriter(kafkaURL, topic)
-
-	defer func(kafkaWriter *kafka.Writer) {
-		_ = kafkaWriter.Close()
-	}(kafkaWriter)
+	database.Init()
+	defer database.Close()
+	events.Init()
+	defer events.Close()
 
 	r := mux.NewRouter()
-	r.HandleFunc("/company", validateMiddleware(createCompanyHandler)).Methods("POST")
-	r.HandleFunc("/company/{id}", validateMiddleware(getCompanyHandler)).Methods("GET")
-	r.HandleFunc("/company/{id}", validateMiddleware(updateCompanyHandler)).Methods("PATCH")
-	r.HandleFunc("/company/{id}", validateMiddleware(deleteCompanyHandler)).Methods("DELETE")
-	r.HandleFunc("/authenticate", createToken).Methods("POST")
+	r.HandleFunc("/company", middleware.ValidateMiddleware(handlers.CreateCompanyHandler)).Methods("POST")
+	r.HandleFunc("/company/{id}", middleware.ValidateMiddleware(handlers.GetCompanyHandler)).Methods("GET")
+	r.HandleFunc("/company/{id}", middleware.ValidateMiddleware(handlers.UpdateCompanyHandler)).Methods("PATCH")
+	r.HandleFunc("/company/{id}", middleware.ValidateMiddleware(handlers.DeleteCompanyHandler)).Methods("DELETE")
+	r.HandleFunc("/authenticate", handlers.CreateToken).Methods("POST")
 
 	http.Handle("/", r)
-	err = http.ListenAndServe(":8080", jsonContentTypeMiddleware(r))
+	err := http.ListenAndServe(":8080", middleware.JsonContentTypeMiddleware(r))
 	if err != nil {
 		log.Fatal("Error starting server.", err)
 		return
-	}
-}
-
-func jsonContentTypeMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func createCompanyHandler(w http.ResponseWriter, r *http.Request) {
-	var company Company
-	err := json.NewDecoder(r.Body).Decode(&company)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if !isValidCompanyType(company.Type) {
-		http.Error(w, "Invalid company type", http.StatusBadRequest)
-		return
-	}
-
-	if err = db.Create(&company).Error; err != nil {
-		http.Error(w, "Invalid values for properties.", http.StatusBadRequest)
-		return
-	}
-
-	produceKafka(fmt.Sprintf("create-%s-%v", company.ID.String(), rand.Int()), company)
-	err = json.NewEncoder(w).Encode(company)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-}
-
-func getCompanyHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id, err := uuid.FromString(vars["id"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var company Company
-	if err := db.First(&company, "id = ?", id).Error; err != nil {
-		http.Error(w, "No record found.", http.StatusNotFound)
-		return
-	}
-	produceKafka(fmt.Sprintf("get-%s-%v", company.ID.String(), rand.Int()), company)
-	_ = json.NewEncoder(w).Encode(company)
-}
-
-func updateCompanyHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id, err := uuid.FromString(vars["id"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var updatedCompany Company
-	err = json.NewDecoder(r.Body).Decode(&updatedCompany)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if !isValidCompanyType(updatedCompany.Type) {
-		http.Error(w, "Invalid company type", http.StatusBadRequest)
-		return
-	}
-
-	var company Company
-	if err := db.First(&company, "id = ?", id).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	if err = db.Model(&company).Updates(updatedCompany).Error; err != nil {
-		http.Error(w, "Invalid values for properties.", http.StatusBadRequest)
-		return
-	}
-
-	produceKafka(fmt.Sprintf("update-%s-%v", updatedCompany.ID.String(), rand.Int()), company)
-	_ = json.NewEncoder(w).Encode(company)
-}
-
-func deleteCompanyHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id, err := uuid.FromString(vars["id"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var company Company
-	if err := db.First(&company, "id = ?", id).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	db.Delete(&company)
-
-	produceKafka(fmt.Sprintf("delete-%s-%v", company.ID.String(), rand.Int()), company)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-var companyTypes = map[CompanyType]bool{
-	Corporations:       true,
-	NonProfit:          true,
-	Cooperative:        true,
-	SoleProprietorship: true,
-}
-
-func isValidCompanyType(t CompanyType) bool {
-	return companyTypes[t]
-}
-
-func createToken(w http.ResponseWriter, r *http.Request) {
-	var user User
-	_ = json.NewDecoder(r.Body).Decode(&user)
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"username": user.Username,
-		"password": user.Password,
-		"exp":      time.Now().Add(time.Hour * time.Duration(1)).Unix(),
-	})
-	tokenString, err := token.SignedString(JwtKey)
-	if err != nil {
-		fmt.Println(err)
-	}
-	_ = json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
-}
-
-func validateMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorizationHeader := r.Header.Get("authorization")
-		if authorizationHeader != "" {
-			bearerToken := strings.Split(authorizationHeader, " ")
-			if len(bearerToken) == 2 {
-				token, err := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
-					if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-						return nil, fmt.Errorf("there was an err")
-					}
-					return JwtKey, nil
-				})
-				if err != nil {
-					_ = json.NewEncoder(w).Encode(Exception{Message: err.Error()})
-					return
-				}
-				if token.Valid {
-					next.ServeHTTP(w, r)
-				} else {
-					_ = json.NewEncoder(w).Encode(Exception{Message: "Invalid authorization token"})
-				}
-			}
-		} else {
-			_ = json.NewEncoder(w).Encode(Exception{Message: "An authorization header is required"})
-		}
-	})
-}
-
-func produceKafka(key string, body interface{}) {
-	bodyStr, _ := json.Marshal(body)
-	msg := kafka.Message{
-		Key:   []byte(key),
-		Value: bodyStr,
-	}
-	err := kafkaWriter.WriteMessages(context.Background(), msg)
-
-	if err != nil {
-		log.Error("Unable to write to kafka", err)
-	}
-}
-
-func getKafkaWriter(kafkaURL, topic string) *kafka.Writer {
-	return &kafka.Writer{
-		Addr:     kafka.TCP(kafkaURL),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
 	}
 }
