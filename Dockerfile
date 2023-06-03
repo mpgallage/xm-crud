@@ -10,6 +10,10 @@ COPY . .
 # download dependencies
 RUN go get -d -v ./...
 
+# run linter
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.53.2
+RUN golangci-lint run
+
 # build the go app
 RUN go build -o github.com/mpgallage/xmcrud .
 
