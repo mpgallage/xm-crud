@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/dgrijalva/jwt-go"
@@ -8,7 +9,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
 	_ "github.com/lib/pq"
+	"github.com/segmentio/kafka-go"
 	log "github.com/sirupsen/logrus"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -39,11 +42,8 @@ type Exception struct {
 	Message string `json:"message"`
 }
 
-type Response struct {
-	Data string `json:"data"`
-}
-
 var JwtKey = []byte(os.Getenv("JWT_KEY"))
+var kafkaWriter *kafka.Writer
 
 type Company struct {
 	ID            uuid.UUID   `gorm:"type:uuid;primary_key;default:uuid_generate_v4()"`
@@ -82,6 +82,15 @@ func main() {
 
 	db.AutoMigrate(&Company{})
 	db.AutoMigrate(&User{})
+
+	kafkaURL := os.Getenv("KAFKA_URL")
+	topic := os.Getenv("KAFKA_TOPIC")
+
+	kafkaWriter = getKafkaWriter(kafkaURL, topic)
+
+	defer func(kafkaWriter *kafka.Writer) {
+		_ = kafkaWriter.Close()
+	}(kafkaWriter)
 
 	r := mux.NewRouter()
 	r.HandleFunc("/company", validateMiddleware(createCompanyHandler)).Methods("POST")
@@ -122,7 +131,8 @@ func createCompanyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid values for properties.", http.StatusBadRequest)
 		return
 	}
-	// TODO: produce event to Kafka
+
+	produceKafka(fmt.Sprintf("create-%s-%v", company.ID.String(), rand.Int()), company)
 	err = json.NewEncoder(w).Encode(company)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -142,6 +152,7 @@ func getCompanyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No record found.", http.StatusNotFound)
 		return
 	}
+	produceKafka(fmt.Sprintf("get-%s-%v", company.ID.String(), rand.Int()), company)
 	_ = json.NewEncoder(w).Encode(company)
 }
 
@@ -174,7 +185,7 @@ func updateCompanyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: produce event to Kafka
+	produceKafka(fmt.Sprintf("update-%s-%v", updatedCompany.ID.String(), rand.Int()), company)
 	_ = json.NewEncoder(w).Encode(company)
 }
 
@@ -191,7 +202,8 @@ func deleteCompanyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Delete(&company)
-	// TODO: produce event to Kafka
+
+	produceKafka(fmt.Sprintf("delete-%s-%v", company.ID.String(), rand.Int()), company)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -247,4 +259,25 @@ func validateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(Exception{Message: "An authorization header is required"})
 		}
 	})
+}
+
+func produceKafka(key string, body interface{}) {
+	bodyStr, _ := json.Marshal(body)
+	msg := kafka.Message{
+		Key:   []byte(key),
+		Value: bodyStr,
+	}
+	err := kafkaWriter.WriteMessages(context.Background(), msg)
+
+	if err != nil {
+		log.Error("Unable to write to kafka", err)
+	}
+}
+
+func getKafkaWriter(kafkaURL, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:     kafka.TCP(kafkaURL),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	}
 }

@@ -8,10 +8,13 @@ services:
     environment:
       DATABASE_ARGS: "host=pg-db port=5432 user=pguser dbname=xmcrud password=pguser sslmode=disable"
       JWT_KEY: "xm-crud-jwt-key"
+      KAFKA_URL: "kafka:9092"
+      KAFKA_TOPIC: "xmcrud"
     ports:
       - "8080:8080"
     depends_on:
       - pg-db
+      - kafka
 
   pg-db:
     image: postgres:15.3-alpine
@@ -24,6 +27,29 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 22181:2181
+
+  kafka:
+    image: wurstmeister/kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_HOST_NAME: kafka
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CREATE_TOPICS: "xmcrud:1:1"
 
 volumes:
     pgdata: {}
