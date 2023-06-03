@@ -1,0 +1,28 @@
+version: '3.9'
+
+services:
+  xm-crud:
+    container_name: xm-crud
+    image: mpgallage/xm-crud:1.0.0
+    build: .
+    environment:
+      DATABASE_ARGS: "host=pg-db port=5432 user=pguser dbname=xmcrud password=pguser sslmode=disable"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - pg-db
+
+  pg-db:
+    image: postgres:15.3-alpine
+    container_name: pp-db
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pguser
+      POSTGRES_DB: xmcrud
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+    pgdata: {}
