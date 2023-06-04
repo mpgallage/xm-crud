@@ -53,7 +53,7 @@ Here are the available endpoints:
     ```json
     {
         "ID": "034c9576-ffef-48db-ab34-36fdd1fd1d45",
-        "Name": "DalaLabs77",
+        "Name": "MyCompany",
         "Description": "This is a description of MyCompany.",
         "EmployeeCount": 150,
         "Registered": true,
@@ -65,7 +65,7 @@ Here are the available endpoints:
 
     ```json
     {
-        "Name": "DalaLabs77",
+        "Name": "MyCompany",
         "Description": "This is a description of MyCompany.",
         "EmployeeCount": 150,
         "Registered": true,
