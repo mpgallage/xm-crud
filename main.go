@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
 	"github.com/mpgallage/xmcrud/database"
@@ -32,7 +33,7 @@ func main() {
 	r.HandleFunc("/authenticate", handlers.CreateToken).Methods("POST")
 
 	http.Handle("/", r)
-	err := http.ListenAndServe(":8080", middleware.JsonContentTypeMiddleware(r))
+	err := http.ListenAndServe(fmt.Sprintf(":%s", os.Getenv("SERVER_PORT")), middleware.JsonContentTypeMiddleware(r))
 	if err != nil {
 		log.Fatal("Error starting server.", err)
 		return

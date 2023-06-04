@@ -1,0 +1,57 @@
+version: '3.9'
+
+services:
+  xm-crud-test:
+    container_name: xm-crud-test
+    image: mpgallage/xm-crud-test:1.0.0
+    build:
+      dockerfile: DockerfileTest
+    environment:
+      SERVER_PORT: 8081
+      DATABASE_ARGS: "host=pg-db-test port=5432 user=${DB_USER} dbname=${DB_NAME} password=${DB_PASS} sslmode=disable"
+      JWT_KEY: "${JWT_KEY}"
+      KAFKA_URL: "kafka-test:9092"
+      KAFKA_TOPIC: "${KAFKA_TOPIC}"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - pg-db-test
+      - kafka-test
+
+  pg-db-test:
+    image: postgres:15.3-alpine
+    container_name: pp-db-test
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  zookeeper-test:
+    image: wurstmeister/zookeeper
+    container_name: zookeeper-test
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "22182:2181"
+
+  kafka-test:
+    image: wurstmeister/kafka
+    container_name: kafka-test
+    depends_on:
+      - zookeeper-test
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_HOST_NAME: kafka-test
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper-test:2181"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CREATE_TOPICS: "${KAFKA_TOPIC}:1:1"
+
+volumes:
+    pgdata: {}

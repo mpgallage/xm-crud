@@ -14,7 +14,13 @@ var JwtKey = []byte(os.Getenv("JWT_KEY"))
 
 func CreateToken(w http.ResponseWriter, r *http.Request) {
 	var user models.User
-	_ = json.NewDecoder(r.Body).Decode(&user)
+	err := json.NewDecoder(r.Body).Decode(&user)
+
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(models.Exception{Message: "Invalid input."})
+		return
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": user.Username,
 		"password": user.Password,
